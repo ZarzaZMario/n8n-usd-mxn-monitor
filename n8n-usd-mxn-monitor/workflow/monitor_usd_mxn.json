@@ -1,0 +1,211 @@
+{
+  "name": "Mini proyecto: Monitor USD/MXN con validación de datos",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Ejecutar manualmente",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n2",
+      "name": "Cada día hábil 8 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Traer tipo de cambio (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "url": "=https://api.frankfurter.dev/v1/{{ $now.minus({days: 30}).toFormat('yyyy-MM-dd') }}..?from=USD&to=MXN",
+        "options": {}
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Validar datos y calcular KPIs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Nodo Code: valida los datos del API y calcula KPIs del tipo de cambio USD/MXN\nconst data = $input.first().json;\nconst rates = data.rates || {};\nconst fechas = Object.keys(rates).sort();\n\n// 1) Validación de calidad de datos\nconst problemas = [];\nif (fechas.length === 0) problemas.push('El API no devolvió datos');\nconst valores = [];\nfor (const f of fechas) {\n  const v = rates[f] && rates[f].MXN;\n  if (typeof v !== 'number' || isNaN(v)) problemas.push('Valor faltante o no numérico en ' + f);\n  else if (v <= 0) problemas.push('Valor no válido en ' + f);\n  else valores.push({ fecha: f, mxn: v });\n}\nif (new Set(fechas).size !== fechas.length) problemas.push('Fechas duplicadas');\n\n// 2) KPIs\nconst n = valores.length;\nconst ultimo = n ? valores[n - 1] : null;\nconst primero = n ? valores[0] : null;\nconst prom = n ? valores.reduce((s, x) => s + x.mxn, 0) / n : null;\nconst min = n ? valores.reduce((a, b) => (b.mxn < a.mxn ? b : a)) : null;\nconst max = n ? valores.reduce((a, b) => (b.mxn > a.mxn ? b : a)) : null;\nconst cambioPct = n > 1 ? ((ultimo.mxn - primero.mxn) / primero.mxn) * 100 : 0;\n\n// 3) Regla de negocio: alerta si el tipo de cambio se movió más de 1.5% en el periodo\nconst UMBRAL_PCT = 1.5;\nconst alerta = problemas.length > 0 || Math.abs(cambioPct) > UMBRAL_PCT;\n\nreturn [{\n  json: {\n    periodo: primero && ultimo ? primero.fecha + ' a ' + ultimo.fecha : 'sin datos',\n    dias_con_dato: n,\n    ultimo_tipo_cambio: ultimo ? ultimo.mxn : null,\n    promedio: prom !== null ? Number(prom.toFixed(4)) : null,\n    minimo: min ? min.mxn + ' (' + min.fecha + ')' : null,\n    maximo: max ? max.mxn + ' (' + max.fecha + ')' : null,\n    cambio_pct: Number(cambioPct.toFixed(2)),\n    problemas_de_datos: problemas,\n    alerta,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "¿Hay alerta?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.alerta }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Mensaje de alerta",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a6",
+              "name": "mensaje",
+              "value": "=ALERTA USD/MXN ({{ $json.periodo }}): el tipo de cambio se movió {{ $json.cambio_pct }}%. Último: {{ $json.ultimo_tipo_cambio }}, promedio: {{ $json.promedio }}, mínimo: {{ $json.minimo }}, máximo: {{ $json.maximo }}. Problemas de datos: {{ $json.problemas_de_datos.length ? $json.problemas_de_datos.join('; ') : 'ninguno' }}.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Mensaje: todo normal",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        960,
+        200
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a7",
+              "name": "mensaje",
+              "value": "=USD/MXN estable ({{ $json.periodo }}): cambio de {{ $json.cambio_pct }}%. Último: {{ $json.ultimo_tipo_cambio }}, promedio: {{ $json.promedio }}. Datos validados sin problemas ({{ $json.dias_con_dato }} días).",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Ejecutar manualmente": {
+      "main": [
+        [
+          {
+            "node": "Traer tipo de cambio (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cada día hábil 8 AM": {
+      "main": [
+        [
+          {
+            "node": "Traer tipo de cambio (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Traer tipo de cambio (API)": {
+      "main": [
+        [
+          {
+            "node": "Validar datos y calcular KPIs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar datos y calcular KPIs": {
+      "main": [
+        [
+          {
+            "node": "¿Hay alerta?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Hay alerta?": {
+      "main": [
+        [
+          {
+            "node": "Mensaje de alerta",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mensaje: todo normal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Mexico_City"
+  },
+  "active": false
+}
